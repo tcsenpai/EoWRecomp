@@ -535,12 +535,6 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
 
 typedef struct { uint32_t image; VkSemaphore acquired; bool ok; } Frame;
 static Frame cur_frame;
-// The next window image, acquired right after a present (vk_frame_end) instead of just before the next one: the
-// release fence of a freshly acquired image is usually still pending, and Turnip's (kgsl) vkQueueSubmit waits for
-// the submission's wait semaphores on the CPU - the game's main thread sat ~10 ms a frame in kgsl_syncobj_wait under
-// the present submission (simpleperf, AYN Thor, the rift chase at the end of the prologue). A frame later the
-// fence has signalled.
-static struct { bool valid; int slot; uint32_t image; VkSwapchainKHR sc; } pre;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
@@ -557,26 +551,16 @@ bool vk_frame_begin(const float clear[4]) {
     static int trace = -1;
     if (trace < 0) trace = getenv("EOWRECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
-    if (pre.valid && pre.sc == g_vk.swapchain) {  // (acquired at the last present)
-        pre.valid = false;
-        slot = pre.slot;
-        cur_frame.image = pre.image;
-    } else {
-        if (pre.valid) {  // (swapchain recreated since: that acquire's semaphore may still get signalled - not reused)
-            pre.valid = false;
-            acquire_sem[pre.slot] = binary_semaphore();
-        }
-        slot = (slot + 1) % FRAMES;
-        if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
-        vk_wait_seq(slot_seq[slot]);
-        VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-            recreate_swapchain();
-            r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
-        }
-        if (r == VK_ERROR_SURFACE_LOST_KHR) { atomic_store(&g_surface_stale, true); return false; }
-        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
+    slot = (slot + 1) % FRAMES;
+    if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
+    vk_wait_seq(slot_seq[slot]);
+    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        recreate_swapchain();
+        r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) { atomic_store(&g_surface_stale, true); return false; }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
@@ -650,14 +634,6 @@ void vk_frame_end(const char *shot_path) {
     // (a swapchain the system turns, IDENTITY on a rotated display, is "suboptimal" at every present: that's this,
     // not a new size - recreating it each frame would cost the frame)
     else if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !g_sc_turned)) recreate_swapchain();
-    else if (!(getenv("EOWRECOMP_VK_LATE_ACQUIRE") && *getenv("EOWRECOMP_VK_LATE_ACQUIRE") == '1')) {  // the next image now (`pre`); =1: at the next frame
-        int next = (slot + 1) % FRAMES;
-        if (!acquire_sem[next]) acquire_sem[next] = binary_semaphore();
-        vk_wait_seq(slot_seq[next]);
-        uint32_t image;
-        VkResult ar = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[next], VK_NULL_HANDLE, &image);
-        if (ar == VK_SUCCESS || ar == VK_SUBOPTIMAL_KHR) pre.valid = true, pre.slot = next, pre.image = image, pre.sc = g_vk.swapchain;
-    }
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
