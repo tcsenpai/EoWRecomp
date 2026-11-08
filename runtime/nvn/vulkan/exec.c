@@ -65,7 +65,7 @@ static bool in_pass;
 // each frame's main submission, measured on an AYN Thor, and the render thread asks at every submission
 // (vk_collect_dead) and in the upload / vertex cache recycling. So the game and the GPU ran in turns: the rift chase at
 // the end of the prologue ran at 24 fps with both idle half the time. Instead each submission ends by writing its
-// number into a small host-coherent buffer, which the CPU reads. vk_wait_seq still waits through the timeline.
+// number into a small host-coherent buffer, which the CPU reads (vk_wait_seq polls it where the timeline is off).
 static VkBuffer seq_buf;
 static VmaAllocation seq_mem;
 static volatile uint64_t *seq_ptr;
